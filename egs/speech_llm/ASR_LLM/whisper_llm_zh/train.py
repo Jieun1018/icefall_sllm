@@ -58,7 +58,7 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 import transformers
 import whisper
-from asr_datamodule import AsrDataModule
+from asr_datamodule import AsrDataModule, LibriSpeechAsrDataModule
 from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_fp32_state_dict
 from label_smoothing import LabelSmoothingLoss
 from lhotse import CutSet, load_manifest
@@ -209,9 +209,17 @@ def get_parser():
     parser.add_argument(
         "--use-aishell",
         type=str2bool,
-        default=True,
+        default=False,
         help="Whether to only use aishell1 dataset for training.",
     )
+
+    parser.add_argument(
+        "--use-librispeech",
+        type=str2bool,
+        default=True,
+        help="Whether to only use librispeech dataset for training.",
+    )
+
 
     parser = deepspeed.add_config_arguments(parser)
     add_model_arguments(parser)
@@ -357,7 +365,8 @@ def compute_loss(
         elif normalize == "m2met":
             import re
 
-            text = text.replace(" ", "")
+            #text = text.capitalize()
+            #text = text.replace(" ", "")
             text = text.replace("<sil>", "")
             text = text.replace("<%>", "")
             text = text.replace("<->", "")
@@ -369,7 +378,8 @@ def compute_loss(
             text = text.replace("&", "")
             text = text.replace(",", "")
             if re.search("[a-zA-Z]", text):
-                text = text.upper()
+                text = text.capitalize()
+                #text = text.upper()
             text = text.replace("Ａ", "A")
             text = text.replace("ａ", "A")
             text = text.replace("ｂ", "B")
@@ -403,7 +413,7 @@ def compute_loss(
     messages = []
     for i, text in enumerate(texts):
         message = [
-            {"role": "user", "content": f"{DEFAULT_SPEECH_TOKEN}请转写音频为文字"},
+            {"role": "user", "content": f"{DEFAULT_SPEECH_TOKEN}Please convert audio into text."},
             {"role": "assistant", "content": text},
         ]
         messages.append(message)
@@ -523,6 +533,7 @@ def train_one_epoch(
     for batch_idx, batch in enumerate(train_dl):
         params.batch_idx_train += 1
         batch_size = len(batch["supervisions"]["text"])
+        '''
         if batch_idx % params.valid_interval == 0 and not params.print_diagnostics:
             logging.info("Computing validation loss")
             valid_info = compute_validation_loss(
@@ -565,6 +576,7 @@ def train_one_epoch(
                     os.system(
                         f"rm -rf {params.exp_dir}/epoch-{params.cur_epoch}-checkpoint-{batch_idx}"
                     )
+        '''
         try:
             with torch.cuda.amp.autocast(enabled=params.use_fp16):
                 loss, loss_info = compute_loss(
@@ -734,7 +746,10 @@ def run(rank, world_size, args):
         args=params, model=model, model_parameters=model.parameters()
     )
 
-    data_module = AsrDataModule(args)
+    if params.use_librispeech:
+        libri_data_module = LibriSpeechAsrDataModule(args)
+    else:
+        data_module = AsrDataModule(args)
     multi_dataset = MultiDataset(args.manifest_dir)
 
     def remove_short_and_long_utt(c: Cut):
@@ -755,6 +770,10 @@ def run(rank, world_size, args):
 
     if params.use_aishell:
         train_cuts = multi_dataset.aishell_train_cuts()
+    elif params.use_librispeech:
+        train_cuts = libri_data_module.train_clean_100_cuts()
+        train_cuts += libri_data_module.train_clean_360_cuts()
+        train_cuts += libri_data_module.train_other_500_cuts()
     else:
         train_cuts = multi_dataset.train_cuts()
 
@@ -765,15 +784,28 @@ def run(rank, world_size, args):
         sampler_state_dict = torch.load(params.sampler_state_dict_path)
         sampler_state_dict["max_duration"] = params.max_duration
     # TODO: load sampler state dict
-    train_dl = data_module.train_dataloaders(
-        train_cuts, sampler_state_dict=sampler_state_dict
-    )
+    if params.use_librispeech:
+        train_dl = libri_data_module.train_dataloaders(
+                train_cuts, sampler_state_dict=sampler_state_dict
+        )
+    else:
+        train_dl = data_module.train_dataloaders(
+                train_cuts, sampler_state_dict=sampler_state_dict
+        )
+
 
     if params.use_aishell:
         valid_cuts = multi_dataset.aishell_dev_cuts()
+    elif params.use_librispeech:
+        valid_cuts = libri_data_module.dev_clean_cuts()
+        valid_cuts += libri_data_module.dev_other_cuts()
     else:
         valid_cuts = multi_dataset.dev_cuts()
-    valid_dl = data_module.valid_dataloaders(valid_cuts)
+    
+    if params.use_librispeech:
+        valid_dl = libri_data_module.valid_dataloaders(valid_cuts)
+    else:
+        valid_dl = data_module.valid_dataloaders(valid_cuts)
 
     if args.tensorboard and rank == 0:
         tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")

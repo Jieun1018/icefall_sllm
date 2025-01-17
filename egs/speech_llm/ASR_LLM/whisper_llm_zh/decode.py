@@ -57,7 +57,7 @@ import torch
 import torch.nn as nn
 import transformers
 import whisper
-from asr_datamodule import AsrDataModule
+from asr_datamodule import AsrDataModule, LibriSpeechAsrDataModule
 from lhotse.cut import Cut
 from model import SPEECH_LLM, EncoderProjector
 from multi_dataset import MultiDataset
@@ -222,7 +222,7 @@ def get_parser():
         "--dataset",
         type=str,
         default="aishell",
-        choices=["aishell", "speechio", "wenetspeech_test_meeting", "multi_hans_zh"],
+        choices=["aishell", "speechio", "wenetspeech_test_meeting", "multi_hans_zh", "librispeech"],
         help="The dataset to decode",
     )
 
@@ -324,7 +324,7 @@ def decode_one_batch(
 
     messages = [
         [
-            {"role": "user", "content": f"{DEFAULT_SPEECH_TOKEN}请转写音频为文字"},
+            {"role": "user", "content": f"{DEFAULT_SPEECH_TOKEN}Please convert audio into text."},
             {"role": "assistant", "content": ""},
         ]
     ] * len(feature)
@@ -368,7 +368,8 @@ def decode_dataset(
         elif normalize == "m2met":
             import re
 
-            text = text.replace(" ", "")
+            #text = text.capitalize()
+            #text = text.replace(" ", "")
             text = text.replace("<sil>", "")
             text = text.replace("<%>", "")
             text = text.replace("<->", "")
@@ -380,7 +381,8 @@ def decode_dataset(
             text = text.replace("&", "")
             text = text.replace(",", "")
             if re.search("[a-zA-Z]", text):
-                text = text.upper()
+                #text = text.upper()
+                text = text.capitalize()
             text = text.replace("Ａ", "A")
             text = text.replace("ａ", "A")
             text = text.replace("ｂ", "B")
@@ -423,6 +425,9 @@ def decode_dataset(
                 ref_words = ref_text.split()
                 print(f"ref: {ref_text}")
                 print(f"hyp: {''.join(hyp_words)}")
+
+                if params.dataset == "librispeech":
+                    hyp_words = hyp_words.split()
                 this_batch.append((cut_id, ref_words, hyp_words))
 
             results[lm_scale].extend(this_batch)
@@ -458,38 +463,70 @@ def save_results(
         errs_filename = (
             params.exp_dir / f"errs-{test_set_name}-{key}-{params.suffix}.txt"
         )
-        # we compute CER for aishell dataset.
-        results_char = []
-        for res in results:
-            results_char.append((res[0], list("".join(res[1])), list("".join(res[2]))))
-        with open(errs_filename, "w") as f:
-            wer = write_error_stats(
-                f, f"{test_set_name}-{key}", results_char, enable_log=enable_log
-            )
-            test_set_wers[key] = wer
+
+        print(results)
+        #exit()
+        if params.dataset == "librispeech":
+            with open(errs_filename, "w") as f:
+                wer = write_error_stats(
+                    f, f"{test_set_name}-{key}", results, enable_log=True
+                )
+                test_set_wers[key] = wer
+        else:
+            # we compute CER for aishell dataset.
+            results_char = []
+            for res in results:
+                #print("0 ", res[0])
+                #print("1 ", res[1])
+                #print("2 ", res[2])
+                #results_char.append((res[0], list("".join(res[1])), list("".join(res[2]))))
+                #print(results_char)
+                #exit()
+                results_char.append((res[0], list("".join(res[1])), list("".join(res[2]))))
+            with open(errs_filename, "w") as f:
+                wer = write_error_stats(
+                    f, f"{test_set_name}-{key}", results_char, enable_log=enable_log
+                )
+                test_set_wers[key] = wer
 
         if enable_log:
             logging.info("Wrote detailed error stats to {}".format(errs_filename))
 
     test_set_wers = sorted(test_set_wers.items(), key=lambda x: x[1])
-    errs_info = params.exp_dir / f"cer-summary-{test_set_name}-{params.suffix}.txt"
-    with open(errs_info, "w") as f:
-        print("settings\tCER", file=f)
+    if params.dataset == "librispeech":
+        errs_info = params.exp_dir / f"wer-summary-{test_set_name}-{params.suffix}.txt"
+        with open(errs_info, "w") as f:
+            print("settings\tWER", file=f)
+            for key, val in test_set_wers:
+                print("{}\t{}".format(key, val), file=f)
+        
+        s = "\nFor {}, WER of different settings are:\n".format(test_set_name)
+        note = "\tbest for {}".format(test_set_name)
         for key, val in test_set_wers:
-            print("{}\t{}".format(key, val), file=f)
+            s += "{}\t{}{}\n".format(key, val, note)
+            note = ""
+        logging.info(s)
 
-    s = "\nFor {}, CER of different settings are:\n".format(test_set_name)
-    note = "\tbest for {}".format(test_set_name)
-    for key, val in test_set_wers:
-        s += "{}\t{}{}\n".format(key, val, note)
-        note = ""
-    logging.info(s)
+    else:
+        errs_info = params.exp_dir / f"cer-summary-{test_set_name}-{params.suffix}.txt"
+        with open(errs_info, "w") as f:
+            print("settings\tCER", file=f)
+            for key, val in test_set_wers:
+                print("{}\t{}".format(key, val), file=f)
+
+        s = "\nFor {}, CER of different settings are:\n".format(test_set_name)
+        note = "\tbest for {}".format(test_set_name)
+        for key, val in test_set_wers:
+            s += "{}\t{}{}\n".format(key, val, note)
+            note = ""
+        logging.info(s)
 
 
 @torch.no_grad()
 def main():
     parser = get_parser()
-    AsrDataModule.add_arguments(parser)
+    #AsrDataModule.add_arguments(parser)
+    LibriSpeechAsrDataModule.add_arguments(parser)
     args = parser.parse_args()
     args.exp_dir = Path(args.exp_dir)
 
@@ -602,7 +639,10 @@ def main():
     # we need cut ids to display recognition results.
     args.return_cuts = True
 
-    data_module = AsrDataModule(args)
+    if params.dataset == "librispeech":
+        libri_data_module = LibriSpeechAsrDataModule(args)
+    else:
+        data_module = AsrDataModule(args)
     multi_dataset = MultiDataset(args.manifest_dir)
 
     def remove_long_utt(c: Cut):
@@ -621,14 +661,34 @@ def main():
         test_sets_cuts = multi_dataset.speechio_test_cuts()
     elif params.dataset == "wenetspeech_test_meeting":
         test_sets_cuts = multi_dataset.wenetspeech_test_meeting_cuts()
+    elif params.dataset == "librispeech":
+        #test_sets_cuts = libri_data_module.test_clean_cuts()
+        #test_sets_cuts += libri_data_module.test_other_cuts()
+        dev_clean_cuts = libri_data_module.dev_clean_cuts()
+        dev_other_cuts = libri_data_module.dev_other_cuts()
+        test_clean_cuts = libri_data_module.test_clean_cuts()
+        test_other_cuts = libri_data_module.test_other_cuts()
+
+        dev_clean_dl = libri_data_module.test_dataloaders(dev_clean_cuts.filter(remove_long_utt))
+        dev_other_dl = libri_data_module.test_dataloaders(dev_other_cuts.filter(remove_long_utt))
+        test_clean_dl = libri_data_module.test_dataloaders(test_clean_cuts.filter(remove_long_utt))
+        test_other_dl = libri_data_module.test_dataloaders(test_other_cuts.filter(remove_long_utt))
     else:
         test_sets_cuts = multi_dataset.test_cuts()
 
-    test_sets = test_sets_cuts.keys()
-    test_dls = [
-        data_module.test_dataloaders(test_sets_cuts[cuts_name].filter(remove_long_utt))
-        for cuts_name in test_sets
-    ]
+    if params.dataset == "librispeech":
+        test_sets = ["dev-clean", "dev-other", "test-clean", "test-other"]
+        #test_dls = [
+                #libri_data_module.test_dataloaders(test_sets_cuts[cuts_name].filter(remove_long_utt))
+                #for cuts_name in test_sets
+        #]
+        test_dls = [dev_clean_dl, dev_other_dl, test_clean_dl, test_other_dl]
+    else:
+        test_sets = test_sets_cuts.keys()
+        test_dls = [
+                data_module.test_dataloaders(test_sets_cuts[cuts_name].filter(remove_long_utt))
+                for cuts_name in test_sets
+        ]
 
     for test_set, test_dl in zip(test_sets, test_dls):
         results_dict = decode_dataset(

@@ -1,0 +1,12 @@
+torchrun --nproc_per_node 2 ./whisper_llm_zh/train.py \
+  --max-duration 100 \
+  --exp-dir ./whisper_llm_zh/exp_test \
+  --speech-encoder-path-or-name models/whisper/exp_large_v2/whisper-large-v2-aishell1-epoch-10-avg-6.pt \
+  --llm-path-or-name Qwen/Qwen2-1.5B-Instruct \
+  --manifest-dir data/fbank \
+  --deepspeed \
+  --deepspeed_config ./whisper_llm_zh/ds_config_zero1.json \
+  --use-flash-attn True \
+  --use-librispeech True \
+  --use-lora True --unfreeze-llm True
+  --pretrained-model-path ./whisper_llm_zh/exp_test/epoch-3.pt
